@@ -1,20 +1,25 @@
 {-# LANGUAGE LambdaCase #-}
-module Main (main) where
+
+module Main
+  ( main
+  ) where
 
 import Control.Applicative
+import Control.Monad
 import Control.Monad.State.Lazy
 import Control.Monad.Trans
 import Data.Char
 import Data.Functor
+import qualified Data.Map.Lazy as M
 import Data.Maybe
 import Data.Tuple
-import System.IO
-import qualified Data.Map.Lazy as M
 import System.Environment
+import System.IO
 
-newtype Parser a = Parser
-  { runParser :: String -> Maybe (String, a)
-  }
+newtype Parser a =
+  Parser
+    { runParser :: String -> Maybe (String, a)
+    }
 
 instance Functor Parser where
   fmap f (Parser p) =
@@ -24,23 +29,25 @@ instance Functor Parser where
 
 instance Applicative Parser where
   pure x = Parser $ \input -> Just (input, x)
-  (Parser p1) <*> (Parser p2) = Parser $ \input -> do
-    (input', f) <- p1 input
-    (input'', a) <- p2 input'
-    return (input'', f a)
+  (Parser p1) <*> (Parser p2) =
+    Parser $ \input -> do
+      (input', f) <- p1 input
+      (input'', a) <- p2 input'
+      return (input'', f a)
 
 instance Alternative Parser where
   empty = Parser $ const Nothing
-  (Parser p1) <|> (Parser p2) =
-    Parser $ \input -> p1 input <|> p2 input
+  (Parser p1) <|> (Parser p2) = Parser $ \input -> p1 input <|> p2 input
 
 matchChar :: (Char -> Bool) -> Parser Char
-matchChar pred = Parser $ \case
-  (y:ys) | pred y -> Just (ys, y)
-  _ -> Nothing
+matchChar pred =
+  Parser $ \case
+    (y:ys)
+      | pred y -> Just (ys, y)
+    _ -> Nothing
 
 charP :: Char -> Parser Char
-charP x = matchChar (==x)
+charP x = matchChar (== x)
 
 stringP :: String -> Parser String
 stringP = traverse charP
@@ -49,11 +56,12 @@ spanP :: (Char -> Bool) -> Parser String
 spanP f = Parser $ Just . swap . span f
 
 notNull :: Parser [a] -> Parser [a]
-notNull (Parser p) = Parser $ \input -> do
-  (input', xs) <- p input
-  if null xs
-  then Nothing
-  else Just (input', xs)
+notNull (Parser p) =
+  Parser $ \input -> do
+    (input', xs) <- p input
+    if null xs
+      then Nothing
+      else Just (input', xs)
 
 ws :: Parser String
 ws = spanP isSpace
@@ -76,13 +84,9 @@ data Value
   | List [Value]
   | Intrinsic Intrinsic
 
-instance Show Value where
-  show Nil = "nil"
-  show (Number n) = show n
-  show (Symbol s) = s
-  show (String s) = show s
-  show (List l) = "(" ++ unwords (map show l) ++ ")"
-  show (Intrinsic _) = "<intrinsic>"
+boolToValue :: Bool -> Value
+boolToValue False = Nil
+boolToValue True = Symbol "t"
 
 typeof :: Value -> String
 typeof Nil = "nil"
@@ -92,29 +96,91 @@ typeof (String _) = "string"
 typeof (List _) = "list"
 typeof (Intrinsic _) = "intrinsic"
 
+iterable :: Value -> Bool
+iterable (String _) = True
+iterable (List _) = True
+iterable _ = False
+
+intoList :: Value -> [Value]
+intoList (List l) = l
+intoList (String s) = Number . ord <$> s
+intoList _ = error "intoList only accepts iterable Values"
+
+applyList :: ([Value] -> Value) -> Value -> Value
+applyList f xs
+  | iterable xs = f $ intoList xs
+applyList _ x = x
+
+hasTypeNumber :: Value -> Bool
+hasTypeNumber (Number n) = True
+hasTypeNumber _ = False
+
+maybeCoarceListToString :: [Value] -> Value
+maybeCoarceListToString xs
+  | all hasTypeNumber xs = String $ (\(Number n) -> chr n) <$> xs
+maybeCoarceListToString xs = List xs
+
+applyListCoarce :: ([Value] -> [Value]) -> Value -> Value
+applyListCoarce f (List l) = List $ f l
+applyListCoarce f (String s) = maybeCoarceListToString $ f $ Number . ord <$> s
+applyListCoarce _ x = x
+
+walk :: (Value -> Value) -> Value -> Value
+walk f (List l) = List $ f <$> l
+walk f (String s) = maybeCoarceListToString $ f . Number . ord <$> s
+walk _ x = x
+
+instance Show Value where
+  show Nil = "nil"
+  show (Number n) = show n
+  show (Symbol s) = s
+  show (String s) = show s
+  show (List l) = "(" ++ unwords (map show l) ++ ")"
+  show (Intrinsic _) = "<intrinsic>"
+
+instance Eq Value where
+  Nil == Nil = True
+  (Number a) == (Number b) = a == b
+  (Symbol a) == (Symbol b) = a == b
+  (String a) == (String b) = a == b
+  (List a) == (List b) = a == b
+  _ == _ = False
+
+checkOrder :: (Ordering -> Bool) -> Value -> Value -> Bool
+checkOrder f (Number a) (Number b) = f (a `compare` b)
+checkOrder f (String a) (String b) = f (a `compare` b)
+checkOrder f (Symbol a) (Symbol b) = f (a `compare` b)
+checkOrder f Nil Nil = f EQ
+checkOrder f (List a) (List b) = and $ zipWith (checkOrder f) a b
+checkOrder _ _ _ = False
+
+acceptOrder :: [Ordering] -> Ordering -> Bool
+acceptOrder = flip elem
+
 instance Num Value where
   (Number a) + (Number b) = Number $ a + b
   (String a) + (String b) = String $ a ++ b
-  (List x) + y = List $ map (+ y) x
-  x + (List y) = List $ map (x +) y
+  xs + y
+    | iterable xs = walk (+ y) xs
+  x + ys
+    | iterable ys = walk (x +) ys
   x + y = error $ "Invalid types for '+': " ++ typeof x ++ " and " ++ typeof y
-
   (Number a) - (Number b) = Number $ a - b
-  (List x) - y = List $ map (flip (-) y) x
-  x - (List y) = List $ map (x -) y
+  xs - y
+    | iterable xs = walk (flip (-) y) xs
+  x - ys
+    | iterable ys = walk (x -) ys
   x - y = error $ "Invalid types for '-': " ++ typeof x ++ " and " ++ typeof y
-
   (Number a) * (Number b) = Number $ a * b
-  (List x) * y = List $ map (+ y) x
-  x * (List y) = List $ map (x +) y
+  xs * y
+    | iterable xs = walk (* y) xs
+  x * ys
+    | iterable ys = walk (x *) ys
   x * y = error $ "Invalid types for '*': " ++ typeof x ++ " and " ++ typeof y
-
   abs (Number n) = Number $ abs n
   abs x = error $ "Invalid type for 'abs': " ++ typeof x
-
   signum (Number n) = Number $ signum n
   signum x = error $ "Invalid type for 'signum': " ++ typeof x
-
   fromInteger n = Number $ fromInteger n
 
 parseSymbolOrNil :: Parser Value
@@ -122,10 +188,8 @@ parseSymbolOrNil = (toValue .: (:)) <$> matchChar isFront <*> spanP isRemaining
   where
     toValue "nil" = Nil
     toValue s = Symbol s
-
     isFront :: Char -> Bool
-    isFront x = isAlpha x || isSymbol x || elem x "?!_.,-*/"
-
+    isFront x = isAlpha x || elem x "?!-_.,-*/<>=!"
     isRemaining :: Char -> Bool
     isRemaining x = isNumber x || isFront x
 
@@ -145,7 +209,8 @@ parseList = List <$> (stringP "(" *> elements <* stringP ")")
     sep = charP ' ' *> ws
 
 parseValue :: Parser Value
-parseValue = foldr1 (<|>) [parseSymbolOrNil, parseNumber, parseString, parseList]
+parseValue =
+  foldr1 (<|>) [parseSymbolOrNil, parseNumber, parseString, parseList]
 
 type Env = M.Map String Value
 
@@ -153,28 +218,31 @@ evalBinOp :: (Value -> Value -> Value) -> Value
 evalBinOp f = Intrinsic $ \args -> forM args eval <&> foldl1 f
 
 evalIf :: Value
-evalIf = Intrinsic $ \(condition:ifTrue:ifFalse) -> do
-  eval condition >>= \case
-    Nil -> maybe (return Nil) eval (listToMaybe ifFalse)
-    _ -> eval ifTrue
+evalIf =
+  Intrinsic $ \(condition:ifTrue:ifFalse) -> do
+    eval condition >>= \case
+      Nil -> maybe (return Nil) eval (listToMaybe ifFalse)
+      _ -> eval ifTrue
 
 evalQuote :: Value
 evalQuote = Intrinsic $ return . List
 
 evalEval :: Value
-evalEval = Intrinsic $ \args -> do
-  if length args == 1
-  then eval (head args) >>= eval
-  else List <$> (traverse eval >=> traverse eval) args
+evalEval =
+  Intrinsic $ \args -> do
+    if length args == 1
+      then eval (head args) >>= eval
+      else List <$> (traverse eval >=> traverse eval) args
 
 evalSet :: Value
-evalSet = Intrinsic $ \(name:value) ->
-  case name of
-    (Symbol s) -> do
-      value <- eval (head value)
-      modify $ M.insert s value
-      return value
-    _ -> error "Cannot set!"
+evalSet =
+  Intrinsic $ \(name:value) ->
+    case name of
+      (Symbol s) -> do
+        value <- eval (head value)
+        modify $ M.insert s value
+        return value
+      _ -> error "Cannot set!"
 
 evalDo :: Value
 evalDo = adapt last
@@ -186,54 +254,89 @@ each :: (Value -> Value) -> Value
 each f = adapt (List . map f)
 
 evalRepeat :: Value
-evalRepeat = adapt $ \case
+evalRepeat =
+  adapt $ \case
     [x] -> List $ repeat x
-    []  -> Nil
-    xs  -> List $ cycle xs
+    [] -> Nil
+    xs -> List $ cycle xs
 
 evalTake :: Value
-evalTake = adapt $ \case
-    ((Number n):(List l):_) -> List $ take n l
+evalTake =
+  adapt $ \case
+    ((Number n):xs:_)
+      | iterable xs -> applyListCoarce (take n) xs
     _ -> error "invalid take call"
 
 evalList :: Value
 evalList = adapt List
 
 evalTail :: Value
-evalTail = each $ \case
-  (List l) -> List $ tail l
-  _ -> error "invalid tail call"
+evalTail = each $ applyListCoarce tail
 
 evalZipWith :: Value
-evalZipWith = Intrinsic $ traverse eval >=> \case
-  [join, List lhs, List rhs] -> do
-    let zipped = zipWith (\l r -> List [join, l, r]) lhs rhs
-    (List <$>) $ traverse eval zipped
-  _ -> error "invalid zip call"
+evalZipWith =
+  Intrinsic $
+  traverse eval >=> \case
+    [join, lhs, rhs]
+      | iterable lhs && iterable rhs ->
+        let lhs' = intoList lhs
+            rhs' = intoList rhs
+            zipped = zipWith (\l r -> List [join, l, r]) lhs' rhs'
+         in (List <$>) $ traverse eval zipped
+    _ -> error "invalid zip call"
 
 index :: Int -> Value
-index n = each $ \case
-  (List l) -> l !! n
-  _ -> error "index not supported for this type"
+index n =
+  each $ \case
+    xs
+      | iterable xs -> intoList xs !! n
+    _ -> error "index not supported for this type"
+
+evalPrint :: Value
+evalPrint =
+  Intrinsic $
+  traverse eval >=> \args -> do
+    forM_ args (liftIO . print')
+    return Nil
+  where
+    print' (String s) = putStrLn s
+    print' x = print x
+
+evalComparison :: [Ordering] -> Value
+evalComparison orderings = adapt $ boolToValue . compare
+  where
+    order = acceptOrder orderings
+    compare :: [Value] -> Bool
+    compare (x:y:remaining) = checkOrder order x y && compare (y : remaining)
+    compare _ = True
 
 defaultEnvironment :: Env
-defaultEnvironment = M.fromList [ ("+", evalBinOp (+))
-                                , ("*", evalBinOp (*))
-                                , ("-", evalBinOp (-))
-                                , ("if", evalIf)
-                                , ("quote", evalQuote)
-                                , ("eval", evalEval)
-                                , ("fn", evalQuote)
-                                , ("set", evalSet)
-                                , ("do", evalDo)
-                                , ("repeat", evalRepeat)
-                                , ("take", evalTake)
-                                , ("list", evalList)
-                                , ("fst", index 0)
-                                , ("snd", index 1)
-                                , ("tail", evalTail)
-                                , ("zip-with", evalZipWith)
-                                ]
+defaultEnvironment =
+  M.fromList
+    [ ("*", evalBinOp (*))
+    , ("+", evalBinOp (+))
+    , ("-", evalBinOp (-))
+    , ("<", evalComparison [LT])
+    , ("<=", evalComparison [LT, EQ])
+    , (">", evalComparison [GT])
+    , (">=", evalComparison [GT, EQ])
+    , ("=", evalComparison [EQ])
+    , ("!=", evalComparison [GT, LT])
+    , ("do", evalDo)
+    , ("eval", evalEval)
+    , ("fn", evalQuote)
+    , ("fst", index 0)
+    , ("if", evalIf)
+    , ("list", evalList)
+    , ("print", evalPrint)
+    , ("quote", evalQuote)
+    , ("repeat", evalRepeat)
+    , ("set", evalSet)
+    , ("snd", index 1)
+    , ("tail", evalTail)
+    , ("take", evalTake)
+    , ("zip-with", evalZipWith)
+    ]
 
 eval :: Value -> StateT Env IO Value
 eval (Symbol s) = do
@@ -241,22 +344,17 @@ eval (Symbol s) = do
   case M.lookup s env of
     Just v -> return v
     _ -> error $ "Undefined variable '" ++ s ++ "'"
-eval (List l) | null l = return Nil
+eval (List l)
+  | null l = return Nil
 eval (List (v:args)) = do
   eval v >>= \case
     (Intrinsic f) -> do
       f args
     (List ((List parameters):body)) -> do
       args <- forM args eval
-      let callParams = M.fromList $ zipWith (\(Symbol s) v -> (s, v)) parameters args
-      callerEnv <- get
-      let bodyEnv = callParams `M.union` callerEnv
-      put bodyEnv
-      returnValues <- forM body eval
-      put callerEnv
-      return $ last returnValues
-
-
+      let callParams =
+            M.fromList $ zipWith (\(Symbol s) v -> (s, v)) parameters args
+      withStateT (callParams `M.union`) (foldM (\_ b -> eval b) Nil body)
     v -> error $ "not callable: " ++ typeof v
 eval x = return x
 
@@ -268,34 +366,52 @@ run v = do
   (v', s) <- runStateT (eval v) defaultEnvironment
   return v'
 
--- Intented for use in GHCI
-execute :: String -> IO (Maybe Value)
-execute code = do
+data Exec
+  = File String
+  | Code String
+
+data Options =
+  Options
+    { executables :: [Exec]
+    , interactiveMode :: Bool
+    }
+
+appendExecutable :: Options -> Exec -> Options
+appendExecutable opt exec = opt {executables = executables opt ++ [exec]}
+
+runExecutables :: Env -> [Exec] -> IO Env
+runExecutables env ((Code code):continue) =
   case runParser parseValue code of
     Nothing -> do
       putStrLn "[ERROR] Failed to parse!"
-      return Nothing
+      return env
     Just (_, value) -> do
-      result <- run value
-      return $ Just result
-
-data Options = Options
-  { sourceFiles :: [String]
-  , interactiveMode :: Bool
-  }
+      (_, env) <- runWithEnv value env
+      runExecutables env continue
+runExecutables env ((File path):continue) = do
+  file <- readFile path
+  runExecutables env (Code file : continue)
+runExecutables env [] = return env
 
 defaultOptions :: Options
-defaultOptions = Options { sourceFiles = [], interactiveMode = False }
+defaultOptions = Options {executables = [], interactiveMode = False}
 
 parseArguments :: IO Options
-parseArguments = foldr go defaultOptions <$> getArgs
+parseArguments = snd . go defaultOptions <$> getArgs
   where
-    go :: String -> Options -> Options
-    go = undefined
-
+    go :: Options -> [String] -> ([String], Options)
+    go opt ("--repl":remaining) = (remaining, opt {interactiveMode = True})
+    go opt (param:code:remaining)
+      | param `elem` ["-c", "--run"] =
+        (remaining, appendExecutable opt $ Code code)
+    go opt (path:remaining) = (remaining, appendExecutable opt $ File path)
+    go opt [] = ([], opt)
 
 main :: IO ()
-main = repl defaultEnvironment
+main = do
+  options <- parseArguments
+  env <- runExecutables defaultEnvironment $ executables options
+  when (null (executables options) || interactiveMode options) $ repl env
 
 repl :: Env -> IO ()
 repl env = do
