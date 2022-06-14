@@ -477,6 +477,9 @@ parseArguments = snd . go defaultOptions <$> getArgs
     go opt (path:remaining) = (remaining, appendExecutable opt $ File path)
     go opt [] = ([], opt)
 
+assembly :: [Instruction] -> IO ()
+assembly = print
+
 main :: IO ()
 main = do
   options <- parseArguments
@@ -484,10 +487,7 @@ main = do
     (\m -> runRWST m () defaultEnvironment) $ do
       runExecutables $ executables options
       when (null (executables options) || interactiveMode options) repl
-  case instructions of
-    x
-      | not $ null x -> print x
-    _ -> return ()
+  unless (null instructions) $ assembly instructions
 
 repl :: Interpreter ()
 repl = do
