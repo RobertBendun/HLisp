@@ -89,8 +89,12 @@ sepBy sep element = parseMany <|> pure []
 (.:) :: (d -> c) -> (a -> b -> d) -> a -> b -> c
 (.:) = (.) . (.)
 
-data Instruction =
-  Instruction
+data Instruction
+  = Label String
+  | Mov Value Value
+  | Syscall
+  | DefineBytes [Value]
+  deriving (Show)
 
 type Interpreter a = RWST () [Instruction] Env IO a
 
@@ -228,9 +232,16 @@ parseList :: Parser Value
 parseList =
   List <$> (ws *> stringP "(" *> sepBy ws parseValue <* stringP ")" <* ws)
 
+parseQuote :: Parser Value
+parseQuote =
+  (\body -> List [Symbol "quote", body]) <$> (charP '\'' *> parseValue)
+
 parseValue :: Parser Value
 parseValue =
-  ws *> foldr1 (<|>) [parseSymbolOrNil, parseNumber, parseString, parseList] <*
+  ws *>
+  foldr1
+    (<|>)
+    [parseSymbolOrNil, parseNumber, parseString, parseList, parseQuote] <*
   ws
 
 parseFile :: Parser Value
@@ -249,7 +260,13 @@ evalIf =
       _ -> eval ifTrue
 
 evalQuote :: Value
-evalQuote = Intrinsic $ return . List
+evalQuote =
+  Intrinsic $ \case
+    [x] -> return x
+    err -> error $ "Invalid arguments for quote: " ++ show err
+
+evalFn :: Value
+evalFn = Intrinsic $ return . List
 
 evalEval :: Value
 evalEval =
@@ -334,6 +351,34 @@ evalComparison orderings = adapt $ boolToValue . compare
     compare (x:y:remaining) = checkOrder order x y && compare (y : remaining)
     compare _ = True
 
+evalLabel :: Value
+evalLabel =
+  Intrinsic $
+  traverse eval >=> \args -> do
+    tell $ (\(Symbol s) -> Label s) <$> args
+    return Nil
+
+evalMov :: Value
+evalMov =
+  Intrinsic $
+  traverse eval >=> \[dst, src] -> do
+    tell [Mov dst src]
+    return Nil
+
+evalSyscall :: Value
+evalSyscall =
+  Intrinsic $
+  traverse eval >=> \[] -> do
+    tell [Syscall]
+    return Nil
+
+evalDb :: Value
+evalDb =
+  Intrinsic $
+  traverse eval >=> \args -> do
+    tell [DefineBytes args]
+    return Nil
+
 defaultEnvironment :: Env
 defaultEnvironment =
   M.fromList
@@ -348,7 +393,7 @@ defaultEnvironment =
     , ("!=", evalComparison [GT, LT])
     , ("do", evalDo)
     , ("eval", evalEval)
-    , ("fn", evalQuote)
+    , ("fn", evalFn)
     , ("fst", index 0)
     , ("if", evalIf)
     , ("list", evalList)
@@ -360,6 +405,11 @@ defaultEnvironment =
     , ("tail", evalTail)
     , ("take", evalTake)
     , ("zip-with", evalZipWith)
+    -- assembler
+    , ("label", evalLabel)
+    , ("mov", evalMov)
+    , ("syscall", evalSyscall)
+    , ("db", evalDb)
     ]
 
 eval :: Value -> Interpreter Value
@@ -378,19 +428,17 @@ eval (List (v:args)) = do
       args <- forM args eval
       let callParams =
             M.fromList $ zipWith (\(Symbol s) v -> (s, v)) parameters args
-      withRWST
-        (\r s -> (r, callParams `M.union` s))
-        (foldM (\_ b -> eval b) Nil body)
+      ctx <- get
+      put $ callParams `M.union` ctx
+      result <- foldM (\_ b -> eval b) Nil body
+      put ctx
+      return result
     v -> error $ "not callable: " ++ typeof v
 eval x = return x
 
-runWithEnv :: Value -> Env -> IO (Value, Env)
-runWithEnv v = ((\(a, s, w) -> (a, s)) <$>) . runRWST (eval v) ()
-
-run :: Value -> IO Value
-run v = do
-  (v', s) <- runWithEnv v defaultEnvironment
-  return v'
+run :: Value -> Env -> [Instruction] -> IO (Value, Env, [Instruction])
+run v env instructions =
+  (\(a, s, w) -> (a, s, instructions ++ w)) <$> runRWST (eval v) () env
 
 data Exec
   = File String
@@ -405,19 +453,19 @@ data Options =
 appendExecutable :: Options -> Exec -> Options
 appendExecutable opt exec = opt {executables = executables opt ++ [exec]}
 
-runExecutables :: Env -> [Exec] -> IO Env
-runExecutables env ((Code code):continue) =
+runExecutables :: Env -> [Instruction] -> [Exec] -> IO (Env, [Instruction])
+runExecutables env instructions ((Code code):continue) =
   case runParser parseFile code of
     Left err -> do
       putStrLn $ "[ERROR] Failed to parse with error: " ++ err
-      return env
+      return (env, instructions)
     Right (_, value) -> do
-      (_, env) <- runWithEnv value env
-      runExecutables env continue
-runExecutables env ((File path):continue) = do
+      (_, env, instructions') <- run value env instructions
+      runExecutables env instructions' continue
+runExecutables env instructions ((File path):continue) = do
   file <- readFile path
-  runExecutables env (Code file : continue)
-runExecutables env [] = return env
+  runExecutables env instructions (Code file : continue)
+runExecutables env instructions [] = return (env, instructions)
 
 defaultOptions :: Options
 defaultOptions = Options {executables = [], interactiveMode = False}
@@ -436,11 +484,14 @@ parseArguments = snd . go defaultOptions <$> getArgs
 main :: IO ()
 main = do
   options <- parseArguments
-  env <- runExecutables defaultEnvironment $ executables options
-  when (null (executables options) || interactiveMode options) $ repl env
+  (env, instructions) <-
+    runExecutables defaultEnvironment [] $ executables options
+  when (null (executables options) || interactiveMode options) $
+    repl env instructions
+  print instructions
 
-repl :: Env -> IO ()
-repl env = do
+repl :: Env -> [Instruction] -> IO ()
+repl env instructions = do
   putStr "> "
   hFlush stdout
   code <- getLine
@@ -448,6 +499,6 @@ repl env = do
     (Left err) -> do
       putStrLn ("[ERROR] Failed to parse due to error: " ++ err)
     (Right (_, value)) -> do
-      (result, env) <- runWithEnv value env
+      (result, env, instructions') <- run value env instructions
       print result
-      repl env
+      repl env instructions'
