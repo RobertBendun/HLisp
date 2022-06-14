@@ -6,8 +6,8 @@ module Main
 
 import Control.Applicative
 import Control.Monad
-import Control.Monad.State.Lazy
 import Control.Monad.Trans
+import Control.Monad.Trans.RWS.Lazy
 import Data.Char
 import Data.Functor
 import qualified Data.Map.Lazy as M
@@ -16,9 +16,13 @@ import Data.Tuple
 import System.Environment
 import System.IO
 
+mapLeft :: (a -> b) -> Either a c -> Either b c
+mapLeft _ (Right s) = Right s
+mapLeft f (Left x) = Left $ f x
+
 newtype Parser a =
   Parser
-    { runParser :: String -> Maybe (String, a)
+    { runParser :: String -> Either String (String, a)
     }
 
 instance Functor Parser where
@@ -28,7 +32,7 @@ instance Functor Parser where
       return (input', f x)
 
 instance Applicative Parser where
-  pure x = Parser $ \input -> Just (input, x)
+  pure x = Parser $ \input -> Right (input, x)
   (Parser p1) <*> (Parser p2) =
     Parser $ \input -> do
       (input', f) <- p1 input
@@ -36,32 +40,43 @@ instance Applicative Parser where
       return (input'', f a)
 
 instance Alternative Parser where
-  empty = Parser $ const Nothing
-  (Parser p1) <|> (Parser p2) = Parser $ \input -> p1 input <|> p2 input
+  empty = Parser $ const (Left "Unsuccessfull parser by design")
+  (Parser p1) <|> (Parser p2) =
+    Parser $ \input ->
+      case p1 input of
+        (Left _) -> p2 input
+        x -> x
+
+mapError :: (String -> String) -> Parser a -> Parser a
+mapError f (Parser p) = Parser (mapLeft f . p)
 
 matchChar :: (Char -> Bool) -> Parser Char
 matchChar pred =
   Parser $ \case
     (y:ys)
-      | pred y -> Just (ys, y)
-    _ -> Nothing
+      | pred y -> Right (ys, y)
+    (y:ys) ->
+      Left
+        ("Didn't match character '" ++
+         [y] ++ "' with given predicate with remaining source: " ++ ys)
+    [] -> Left "Didn't match character due to end of file"
 
 charP :: Char -> Parser Char
-charP x = matchChar (== x)
+charP x = mapError (("charP '" ++ [x] ++ "': ") ++) $ matchChar (== x)
 
 stringP :: String -> Parser String
 stringP = traverse charP
 
 spanP :: (Char -> Bool) -> Parser String
-spanP f = Parser $ Just . swap . span f
+spanP f = Parser $ Right . swap . span f
 
 notNull :: Parser [a] -> Parser [a]
 notNull (Parser p) =
   Parser $ \input -> do
     (input', xs) <- p input
     if null xs
-      then Nothing
-      else Just (input', xs)
+      then Left "Expected input to be not null"
+      else Right (input', xs)
 
 ws :: Parser String
 ws = spanP isSpace
@@ -74,7 +89,12 @@ sepBy sep element = parseMany <|> pure []
 (.:) :: (d -> c) -> (a -> b -> d) -> a -> b -> c
 (.:) = (.) . (.)
 
-type Intrinsic = [Value] -> StateT Env IO Value
+data Instruction =
+  Instruction
+
+type Interpreter a = RWST () [Instruction] Env IO a
+
+type Intrinsic = [Value] -> Interpreter Value
 
 data Value
   = Nil
@@ -185,32 +205,36 @@ instance Num Value where
 
 parseSymbolOrNil :: Parser Value
 parseSymbolOrNil = (toValue .: (:)) <$> matchChar isFront <*> spanP isRemaining
-  where
-    toValue "nil" = Nil
-    toValue s = Symbol s
-    isFront :: Char -> Bool
-    isFront x = isAlpha x || elem x "?!-_.,-*/<>=!"
-    isRemaining :: Char -> Bool
-    isRemaining x = isNumber x || isFront x
+
+toValue "nil" = Nil
+toValue s = Symbol s
+
+isFront :: Char -> Bool
+isFront x = isAlpha x || elem x "?!-_.,-*/<>=!"
+
+isRemaining :: Char -> Bool
+isRemaining x = isNumber x || isFront x
 
 parseNumber :: Parser Value
-parseNumber = Number . read <$> notNull (spanP isDigit)
+parseNumber = Number . read <$> (ws *> notNull (spanP isDigit) <* ws)
 
 parseString :: Parser Value
-parseString = stringP "\"" *> stringLiteral <* stringP "\""
+parseString = ws *> stringP "\"" *> stringLiteral <* stringP "\"" <* ws
   where
     stringLiteral :: Parser Value
     stringLiteral = String <$> spanP (/= '\"')
 
 parseList :: Parser Value
-parseList = List <$> (stringP "(" *> elements <* stringP ")")
-  where
-    elements = sepBy sep parseValue
-    sep = charP ' ' *> ws
+parseList =
+  List <$> (ws *> stringP "(" *> sepBy ws parseValue <* stringP ")" <* ws)
 
 parseValue :: Parser Value
 parseValue =
-  foldr1 (<|>) [parseSymbolOrNil, parseNumber, parseString, parseList]
+  ws *> foldr1 (<|>) [parseSymbolOrNil, parseNumber, parseString, parseList] <*
+  ws
+
+parseFile :: Parser Value
+parseFile = (\body -> List (Symbol "do" : body)) <$> many parseValue
 
 type Env = M.Map String Value
 
@@ -338,7 +362,7 @@ defaultEnvironment =
     , ("zip-with", evalZipWith)
     ]
 
-eval :: Value -> StateT Env IO Value
+eval :: Value -> Interpreter Value
 eval (Symbol s) = do
   env <- get
   case M.lookup s env of
@@ -354,16 +378,18 @@ eval (List (v:args)) = do
       args <- forM args eval
       let callParams =
             M.fromList $ zipWith (\(Symbol s) v -> (s, v)) parameters args
-      withStateT (callParams `M.union`) (foldM (\_ b -> eval b) Nil body)
+      withRWST
+        (\r s -> (r, callParams `M.union` s))
+        (foldM (\_ b -> eval b) Nil body)
     v -> error $ "not callable: " ++ typeof v
 eval x = return x
 
 runWithEnv :: Value -> Env -> IO (Value, Env)
-runWithEnv v = runStateT (eval v)
+runWithEnv v = ((\(a, s, w) -> (a, s)) <$>) . runRWST (eval v) ()
 
 run :: Value -> IO Value
 run v = do
-  (v', s) <- runStateT (eval v) defaultEnvironment
+  (v', s) <- runWithEnv v defaultEnvironment
   return v'
 
 data Exec
@@ -381,11 +407,11 @@ appendExecutable opt exec = opt {executables = executables opt ++ [exec]}
 
 runExecutables :: Env -> [Exec] -> IO Env
 runExecutables env ((Code code):continue) =
-  case runParser parseValue code of
-    Nothing -> do
-      putStrLn "[ERROR] Failed to parse!"
+  case runParser parseFile code of
+    Left err -> do
+      putStrLn $ "[ERROR] Failed to parse with error: " ++ err
       return env
-    Just (_, value) -> do
+    Right (_, value) -> do
       (_, env) <- runWithEnv value env
       runExecutables env continue
 runExecutables env ((File path):continue) = do
@@ -419,9 +445,9 @@ repl env = do
   hFlush stdout
   code <- getLine
   case runParser parseValue code of
-    Nothing -> do
-      putStrLn "[ERROR] Failed to parse!"
-    Just (_, value) -> do
+    (Left err) -> do
+      putStrLn ("[ERROR] Failed to parse due to error: " ++ err)
+    (Right (_, value)) -> do
       (result, env) <- runWithEnv value env
       print result
       repl env
