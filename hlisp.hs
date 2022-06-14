@@ -436,10 +436,6 @@ eval (List (v:args)) = do
     v -> error $ "not callable: " ++ typeof v
 eval x = return x
 
-run :: Value -> Env -> [Instruction] -> IO (Value, Env, [Instruction])
-run v env instructions =
-  (\(a, s, w) -> (a, s, instructions ++ w)) <$> runRWST (eval v) () env
-
 data Exec
   = File String
   | Code String
@@ -453,19 +449,19 @@ data Options =
 appendExecutable :: Options -> Exec -> Options
 appendExecutable opt exec = opt {executables = executables opt ++ [exec]}
 
-runExecutables :: Env -> [Instruction] -> [Exec] -> IO (Env, [Instruction])
-runExecutables env instructions ((Code code):continue) =
+runExecutables :: [Exec] -> Interpreter Value
+runExecutables ((Code code):continue) =
   case runParser parseFile code of
     Left err -> do
-      putStrLn $ "[ERROR] Failed to parse with error: " ++ err
-      return (env, instructions)
+      (lift . putStrLn) $ "[ERROR] Failed to parse with error: " ++ err
+      return Nil
     Right (_, value) -> do
-      (_, env, instructions') <- run value env instructions
-      runExecutables env instructions' continue
-runExecutables env instructions ((File path):continue) = do
-  file <- readFile path
-  runExecutables env instructions (Code file : continue)
-runExecutables env instructions [] = return (env, instructions)
+      eval value
+      runExecutables continue
+runExecutables ((File path):continue) = do
+  file <- (lift . readFile) path
+  runExecutables (Code file : continue)
+runExecutables [] = return Nil
 
 defaultOptions :: Options
 defaultOptions = Options {executables = [], interactiveMode = False}
@@ -484,21 +480,24 @@ parseArguments = snd . go defaultOptions <$> getArgs
 main :: IO ()
 main = do
   options <- parseArguments
-  (env, instructions) <-
-    runExecutables defaultEnvironment [] $ executables options
-  when (null (executables options) || interactiveMode options) $
-    repl env instructions
-  print instructions
+  (_, _, instructions) <-
+    (\m -> runRWST m () defaultEnvironment) $ do
+      runExecutables $ executables options
+      when (null (executables options) || interactiveMode options) repl
+  case instructions of
+    x
+      | not $ null x -> print x
+    _ -> return ()
 
-repl :: Env -> [Instruction] -> IO ()
-repl env instructions = do
-  putStr "> "
-  hFlush stdout
-  code <- getLine
+repl :: Interpreter ()
+repl = do
+  (lift . putStr) "> "
+  (lift . hFlush) stdout
+  code <- lift getLine
   case runParser parseValue code of
     (Left err) -> do
-      putStrLn ("[ERROR] Failed to parse due to error: " ++ err)
+      (lift . putStrLn) ("[ERROR] Failed to parse due to error: " ++ err)
     (Right (_, value)) -> do
-      (result, env, instructions') <- run value env instructions
-      print result
-      repl env instructions'
+      result <- eval value
+      (lift . print) result
+      repl
