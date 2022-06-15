@@ -17,3 +17,8 @@ $ ndisasm -b 64 a.out
 00000005  BF00000000        mov edi,0x0
 0000000A  0F05              syscall
 ```
+
+## See also
+
+- [Unnoficial (but nice) list of x86_64 instructions](https://www.felixcloutier.com/x86/mov)
+- [Offical Intel reference](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html)
