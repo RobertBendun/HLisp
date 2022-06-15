@@ -6,6 +6,8 @@ import Assembler
 import Control.Monad
 import Control.Monad.Trans
 import Control.Monad.Trans.RWS.Lazy
+import Data.ByteString.Builder
+import qualified Data.ByteString.Lazy as B
 import qualified Data.Map.Lazy as M
 import Evaluator
 import Parser
@@ -60,7 +62,9 @@ main = do
     (\m -> runRWST m () defaultEnvironment) $ do
       runExecutables $ executables options
       when (null (executables options) || interactiveMode options) repl
-  unless (null instructions) $ assembly instructions
+  unless (null instructions) $ do
+    result <- assembly instructions
+    B.writeFile "a.out" (toLazyByteString result)
 
 repl :: Interpreter ()
 repl = do

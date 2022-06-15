@@ -125,21 +125,21 @@ evalMov :: Value
 evalMov =
   Intrinsic $
   traverse eval >=> \[dst, src] -> do
-    tell [Mov dst src]
+    tell [Call $ [Symbol "mov", dst, src]]
     return Nil
 
 evalSyscall :: Value
 evalSyscall =
   Intrinsic $
   traverse eval >=> \[] -> do
-    tell [Syscall]
+    tell [Call [Symbol "syscall"]]
     return Nil
 
 evalDb :: Value
 evalDb =
   Intrinsic $
   traverse eval >=> \args -> do
-    tell [DefineBytes args]
+    tell [Call (Symbol "db" : args)]
     return Nil
 
 defaultEnvironment :: Env

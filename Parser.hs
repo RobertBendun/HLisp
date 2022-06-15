@@ -81,16 +81,14 @@ sepBy sep element = parseMany <|> pure []
 (.:) :: (d -> c) -> (a -> b -> d) -> a -> b -> c
 (.:) = (.) . (.)
 
-data Instruction
+data Statement
   = Label String
-  | Mov Value Value
-  | Syscall
-  | DefineBytes [Value]
+  | Call [Value]
   deriving (Show)
 
 type Env = M.Map String Value
 
-type Interpreter a = RWST () [Instruction] Env IO a
+type Interpreter a = RWST () [Statement] Env IO a
 
 type Intrinsic = [Value] -> Interpreter Value
 
