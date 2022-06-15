@@ -121,18 +121,11 @@ evalLabel =
     tell $ (\(Symbol s) -> Label s) <$> args
     return Nil
 
-evalMov :: Value
-evalMov =
+evalAsmCall :: String -> Value
+evalAsmCall name =
   Intrinsic $
-  traverse eval >=> \[dst, src] -> do
-    tell [Call $ [Symbol "mov", dst, src]]
-    return Nil
-
-evalSyscall :: Value
-evalSyscall =
-  Intrinsic $
-  traverse eval >=> \[] -> do
-    tell [Call [Symbol "syscall"]]
+  traverse eval >=> \args -> do
+    tell [Call (Symbol name : args)]
     return Nil
 
 evalDb :: Value
@@ -170,8 +163,6 @@ defaultEnvironment =
     , ("zip-with", evalZipWith)
     -- assembler
     , ("label", evalLabel)
-    , ("mov", evalMov)
-    , ("syscall", evalSyscall)
     , ("db", evalDb)
     ]
 

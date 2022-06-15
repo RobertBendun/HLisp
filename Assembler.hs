@@ -5,8 +5,10 @@ module Assembler where
 import Data.ByteString.Builder
 import qualified Data.ByteString.Lazy as B
 import Data.Foldable (find)
+import qualified Data.Map.Lazy as M
 import Data.Maybe
 import Data.Word
+import Evaluator (evalAsmCall)
 import Parser
 
 data Operand
@@ -94,6 +96,11 @@ instructions =
       , bytes = addRegister 0xb8 0 <> immmidiate 1
       }
   ]
+
+instructionsEnv :: Env
+instructionsEnv =
+  M.mapWithKey (\k _ -> evalAsmCall k) $
+  M.fromList $ zip (map name instructions) (repeat ())
 
 data Instruction =
   Instruction

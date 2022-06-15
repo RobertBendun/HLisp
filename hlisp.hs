@@ -59,7 +59,7 @@ main :: IO ()
 main = do
   options <- parseArguments
   (_, _, instructions) <-
-    (\m -> runRWST m () defaultEnvironment) $ do
+    (\m -> runRWST m () (M.union instructionsEnv defaultEnvironment)) $ do
       runExecutables $ executables options
       when (null (executables options) || interactiveMode options) repl
   unless (null instructions) $ do
