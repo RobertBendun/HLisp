@@ -4,7 +4,7 @@ Assembler that uses LISP to provide macro assembler experience written in Haskel
 
 ## Eaxmple
 
-```
+```console
 $ cat examples/asm-exit.lisp
 (set sys-exit 60)
 
